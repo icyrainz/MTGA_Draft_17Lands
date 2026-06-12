@@ -14,7 +14,7 @@ Usage:
 Keys while watching:
     p  picks so far    c  color signals    r  re-print pack    q  quit
 
-Requires only the headless dependencies: numpy, pydantic, requests.
+Requires only the headless dependencies (requirements-cli.txt); no GUI libraries.
 """
 
 import argparse
@@ -23,6 +23,13 @@ import os
 import queue
 import select
 import sys
+
+try:
+    import termios
+    import tty
+except ImportError:
+    # No termios (e.g. native Windows): watch-only mode, no key commands
+    termios = tty = None
 
 # BASE_DIR (Sets/, Logs/, config) is derived from the working directory, so the
 # CLI must run from the repo root regardless of where it was invoked.
@@ -110,10 +117,10 @@ def load_set_dataset(scanner, config, set_code):
 
 def bootstrap(args):
     """Same sequence as main.py:load_data, minus the splash screen."""
+    # Display preferences stay out of `config`: bootstrap and the orchestrator
+    # both persist it to the GUI's shared config.json, and the CLI must not
+    # rewrite the GUI's settings.
     config, _ = read_configuration()
-    if args.filter:
-        config.settings.deck_filter = args.filter
-    config.settings.result_format = args.format or constants.RESULT_FORMAT_GRADE
 
     say("Locating Arena logs")
     log_path = search_arena_log_locations(args.file, config.settings.arena_log_location)
@@ -173,7 +180,7 @@ def bootstrap(args):
     return config, scanner
 
 
-def snapshot(scanner, config):
+def snapshot(scanner, config, opts):
     """Mirror of app_controller.refresh_ui_data's state snapshot + math."""
     with scanner.lock:
         event_set, event_type = scanner.retrieve_current_limited_event()
@@ -182,7 +189,9 @@ def snapshot(scanner, config):
         taken_cards = scanner.retrieve_taken_cards()
         pack_cards = scanner.retrieve_current_pack_cards()
         picked_cards = scanner.retrieve_current_picked_cards()
-        history = scanner.retrieve_draft_history()
+        # copy: the scanner returns its live list and the orchestrator thread
+        # appends to it
+        history = list(scanner.retrieve_draft_history())
 
     scores = {c: 0.0 for c in constants.CARD_COLORS}
     try:
@@ -203,7 +212,7 @@ def snapshot(scanner, config):
     except Exception as error:
         logging.getLogger(__name__).warning(f"Advisor failed: {error}")
 
-    colors = filter_options(taken_cards, config.settings.deck_filter, metrics, config)
+    colors = filter_options(taken_cards, opts.deck_filter, metrics, config)
 
     return {
         "event_set": event_set,
@@ -220,7 +229,7 @@ def snapshot(scanner, config):
     }
 
 
-def card_stat_row(card, active_filter, metrics, result_format=constants.RESULT_FORMAT_GRADE):
+def card_stat_row(card, active_filter, metrics, result_format):
     stats = card.get("deck_colors", {}).get(active_filter, {})
     gihwr = stats.get(constants.DATA_FIELD_GIHWR, 0.0) or 0.0
     grade = format_win_rate(
@@ -241,7 +250,7 @@ def card_stat_row(card, active_filter, metrics, result_format=constants.RESULT_F
     }
 
 
-def render_pack(snap, config):
+def render_pack(snap, opts):
     pack, pick = snap["pack"], snap["pick"]
     if pack <= 0 or not snap["pack_cards"]:
         say("Waiting for a pack... (start or continue a draft in MTGA)")
@@ -265,7 +274,7 @@ def render_pack(snap, config):
     for card in snap["pack_cards"]:
         name = card.get(constants.DATA_FIELD_NAME, "Unknown")
         rec = rec_map.get(name)
-        stats = card_stat_row(card, active_filter, metrics, config.settings.result_format)
+        stats = card_stat_row(card, active_filter, metrics, opts.result_format)
         rows.append((rec.contextual_score if rec else stats["gihwr"], name, rec, card, stats))
     rows.sort(key=lambda r: r[0], reverse=True)
 
@@ -288,14 +297,15 @@ def render_pack(snap, config):
         )
 
     top = [r for r in snap["recommendations"] if r.card_name not in picked_names][:1]
-    if top:
+    # base_win_rate == 0 means no 17Lands data; a suggestion would be arbitrary
+    if top and top[0].base_win_rate > 0:
         rec = top[0]
         reasons = "; ".join(rec.reasoning[:3]) if rec.reasoning else ""
         print(tint(f">> Suggested: {rec.card_name} (score {rec.contextual_score:.0f})"
                    f"{' - ' + reasons if reasons else ''}", BOLD))
 
 
-def render_picks(snap):
+def render_picks(snap, opts):
     taken = snap["taken_cards"]
     if not taken:
         say("No picks yet")
@@ -313,7 +323,7 @@ def render_picks(snap):
     print(tint(f"{'#':>2}  {'GRADE':<5} {'GIH%':>5}  {'CLR':<5} CARD", DIM))
     rows = []
     for name, info in counts.items():
-        stats = card_stat_row(info["card"], active_filter, metrics)
+        stats = card_stat_row(info["card"], active_filter, metrics, opts.result_format)
         rows.append((stats["gihwr"], name, info, stats))
     rows.sort(key=lambda r: r[0], reverse=True)
     for _, name, info, stats in rows:
@@ -335,28 +345,32 @@ def render_signals(snap):
     print(f"  active filter: {snap['filter']}")
 
 
-def watch(config, scanner):
+def state_key(snap):
+    """Identity of the rendered state; a REFRESH only prints when it changes."""
+    names = tuple(sorted(c.get(constants.DATA_FIELD_NAME, "") for c in snap["pack_cards"]))
+    return (
+        snap["event_set"],
+        snap["pack"],
+        snap["pick"],
+        names,
+        len(snap["picked_cards"] or []),
+        snap["filter"],
+    )
+
+
+def watch(config, scanner, opts, last_state):
+    """Follow the log; `last_state` is the state main() already rendered."""
     orchestrator = DraftOrchestrator(scanner, config, lambda: None)
     orchestrator.start()
 
-    interactive = sys.stdin.isatty()
+    interactive = sys.stdin.isatty() and termios is not None
     old_attrs = None
-    if interactive:
-        import termios
-        import tty
-
-        old_attrs = termios.tcgetattr(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())
-        print("keys: [p]icks  [c]olor signals  [r]eprint pack  [q]uit")
-
-    def state_key(snap):
-        names = tuple(sorted(c.get(constants.DATA_FIELD_NAME, "") for c in snap["pack_cards"]))
-        return (snap["pack"], snap["pick"], names, len(snap["picked_cards"] or []))
-
-    # main() already rendered the current state; only print on change.
-    last_state = state_key(snapshot(scanner, config))
-
     try:
+        if interactive and termios is not None and tty is not None:
+            old_attrs = termios.tcgetattr(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+            print("keys: [p]icks  [c]olor signals  [r]eprint pack  [q]uit")
+
         while True:
             refresh = False
             try:
@@ -374,11 +388,11 @@ def watch(config, scanner):
                 pass
 
             if refresh:
-                snap = snapshot(scanner, config)
+                snap = snapshot(scanner, config, opts)
                 key = state_key(snap)
                 if key != last_state:
                     last_state = key
-                    render_pack(snap, config)
+                    render_pack(snap, opts)
 
             if interactive:
                 ready, _, _ = select.select([sys.stdin], [], [], 0)
@@ -387,21 +401,20 @@ def watch(config, scanner):
                     if char == "q":
                         break
                     if char == "p":
-                        render_picks(snapshot(scanner, config))
+                        render_picks(snapshot(scanner, config, opts), opts)
                     elif char == "c":
-                        render_signals(snapshot(scanner, config))
+                        render_signals(snapshot(scanner, config, opts))
                     elif char == "r":
-                        snap = snapshot(scanner, config)
+                        snap = snapshot(scanner, config, opts)
                         last_state = state_key(snap)
-                        render_pack(snap, config)
+                        render_pack(snap, opts)
     except KeyboardInterrupt:
         pass
     finally:
-        if old_attrs is not None:
-            import termios
-
+        if old_attrs is not None and termios is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_attrs)
         orchestrator.stop()
+        orchestrator.join(timeout=2)
     print("\nbye")
 
 
@@ -422,16 +435,22 @@ def main():
         help="Rating display format",
     )
     args = parser.parse_args()
+    opts = argparse.Namespace(
+        deck_filter=args.filter or constants.DECK_FILTER_DEFAULT,
+        result_format=args.format or constants.RESULT_FORMAT_GRADE,
+    )
 
     config, scanner = bootstrap(args)
 
-    snap = snapshot(scanner, config)
-    render_pack(snap, config)
+    snap = snapshot(scanner, config, opts)
+    render_pack(snap, opts)
     if snap["taken_cards"]:
-        render_picks(snap)
+        render_picks(snap, opts)
 
     if not args.once:
-        watch(config, scanner)
+        # seed dedupe from the exact state just rendered, so a pack that
+        # arrives between this render and the watch loop still prints
+        watch(config, scanner, opts, state_key(snap))
 
 
 if __name__ == "__main__":
