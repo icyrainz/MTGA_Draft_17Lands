@@ -10,9 +10,10 @@ Usage:
     python cli.py                 watch the live Player.log
     python cli.py -f <log>        watch (or replay) a specific log file
     python cli.py --once          print the current draft state and exit
+    python cli.py --deck          build a suggested deck from the pool and exit
 
 Keys while watching:
-    p  picks so far    c  color signals    r  re-print pack    q  quit
+    p  picks    c  color signals    d  build deck    r  re-print pack    q  quit
 
 Requires only the headless dependencies (requirements-cli.txt); no GUI libraries.
 """
@@ -136,8 +137,11 @@ def bootstrap(args):
             "(Options -> Account) and restart Arena."
         )
     print(f"    log: {log_path}")
-    config.settings.arena_log_location = log_path
-    write_configuration(config)
+    # A one-off replay (-f) must not overwrite the persisted live-log path, or
+    # the next plain run would keep reading the replayed file.
+    if not args.file:
+        config.settings.arena_log_location = log_path
+        write_configuration(config)
 
     db_loc = config.settings.database_location
     if not (db_loc and os.path.exists(os.path.join(db_loc, "Downloads", "Raw"))):
@@ -350,6 +354,69 @@ def render_signals(snap):
     print(f"  active filter: {snap['filter']}")
 
 
+def render_deck(snap, opts, config):
+    """Build and print a suggested 40-card deck from the drafted pool."""
+    taken = snap["taken_cards"]
+    if not taken or len(taken) < 15:
+        say("Not enough cards in the pool to build a deck yet")
+        return
+
+    from src.card_logic import suggest_deck
+
+    say("Building decks (simulating archetypes, this can take a moment)...")
+    decks = suggest_deck(
+        taken,
+        snap["metrics"],
+        config,
+        event_type=snap["event_type"] or "PremierDraft",
+        progress_callback=lambda m: (
+            say(m["status"]) if isinstance(m, dict) and "status" in m else None
+        ),
+        dataset_name=config.card_data.latest_dataset,
+    )
+    if not decks:
+        say("Not enough on-color playables to form a 40-card deck (need ~22 spells)")
+        return
+
+    labels = list(decks.keys())
+    best = decks[labels[0]]
+    cards = best.get("deck_cards", [])
+    spells = [c for c in cards if "Land" not in c.get("types", [])]
+    lands = [c for c in cards if "Land" in c.get("types", [])]
+    count = lambda lst: sum(c.get(constants.DATA_FIELD_COUNT, 1) for c in lst)
+
+    print()
+    print(tint(f"== Suggested deck: {labels[0]} ==", BOLD))
+    print(
+        f"  {tint_colors(best.get('colors', []))}  |  {count(cards)} cards "
+        f"({count(spells)} spells, {count(lands)} lands)  |  est. record {best.get('record', '?')}"
+    )
+    print(tint(f"  {'#':>2} {'CMC':>3}  {'CLR':<5} CARD", DIM))
+    for card in sorted(
+        spells,
+        key=lambda c: (c.get("cmc", 0) or 0, c.get(constants.DATA_FIELD_NAME, "")),
+    ):
+        cnt = card.get(constants.DATA_FIELD_COUNT, 1)
+        cmc = card.get("cmc", 0) or 0
+        colors = card.get("colors", [])
+        print(
+            f"  {cnt:>2} {float(cmc):>3.0f}  "
+            f"{pad(tint_colors(colors), ''.join(colors), 5)} {card.get(constants.DATA_FIELD_NAME)}"
+        )
+    if lands:
+        land_str = ", ".join(
+            f"{c.get(constants.DATA_FIELD_COUNT, 1)} {c.get(constants.DATA_FIELD_NAME)}"
+            for c in lands
+        )
+        print(f"  lands: {land_str}")
+    sideboard = best.get("sideboard_cards") or []
+    if sideboard:
+        sb = ", ".join(c.get(constants.DATA_FIELD_NAME) for c in sideboard[:15])
+        print(tint(f"  sideboard: {sb}", DIM))
+    if len(labels) > 1:
+        print(tint("  other builds: " + "  |  ".join(labels[1:5]), DIM))
+
+
 def state_key(snap):
     """Identity of the rendered state; a REFRESH only prints when it changes."""
     names = tuple(sorted(c.get(constants.DATA_FIELD_NAME, "") for c in snap["pack_cards"]))
@@ -374,7 +441,7 @@ def watch(config, scanner, opts, last_state):
         if interactive and termios is not None and tty is not None:
             old_attrs = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
-            print("keys: [p]icks  [c]olor signals  [r]eprint pack  [q]uit")
+            print("keys: [p]icks  [c]olor signals  [d]eck build  [r]eprint pack  [q]uit")
 
         while True:
             refresh = False
@@ -409,6 +476,8 @@ def watch(config, scanner, opts, last_state):
                         render_picks(snapshot(scanner, config, opts), opts)
                     elif char == "c":
                         render_signals(snapshot(scanner, config, opts))
+                    elif char == "d":
+                        render_deck(snapshot(scanner, config, opts), opts, config)
                     elif char == "r":
                         snap = snapshot(scanner, config, opts)
                         last_state = state_key(snap)
@@ -428,6 +497,7 @@ def main():
     parser.add_argument("-f", "--file", help="Path to Player.log (default: auto-detect)")
     parser.add_argument("-d", "--data", help="Path to the MTGA_Data directory")
     parser.add_argument("--once", action="store_true", help="Print current draft state and exit")
+    parser.add_argument("--deck", action="store_true", help="Build a suggested deck from the pool, then exit")
     parser.add_argument("--no-sync", action="store_true", help="Skip the dataset cloud sync")
     parser.add_argument("--filter", help="Deck color filter (e.g. 'All Decks', 'Auto', 'WU')")
     parser.add_argument(
@@ -451,6 +521,10 @@ def main():
     render_pack(snap, opts)
     if snap["taken_cards"]:
         render_picks(snap, opts)
+
+    if args.deck:
+        render_deck(snap, opts, config)
+        return
 
     if not args.once:
         # seed dedupe from the exact state just rendered, so a pack that
