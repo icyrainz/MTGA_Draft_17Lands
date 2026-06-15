@@ -106,12 +106,17 @@ def say(message):
 def load_set_dataset(scanner, config, set_code):
     """Loads the local Sets/ dataset matching the event's set code."""
     sources = scanner.retrieve_data_sources()
-    for label, path in sources.items():
-        if f"[{set_code.upper()}]" in label.upper():
-            scanner.retrieve_set_data(path)
-            config.card_data.latest_dataset = os.path.basename(path)
-            write_configuration(config)
-            return True
+    tag = f"[{set_code.upper()}]"
+    matches = [(label, path) for label, path in sources.items() if tag in label.upper()]
+    # 17Lands "Top" (top-player) datasets are frequently empty for QuickDraft,
+    # which would leave every card ungraded. Prefer the "(All)" variant, which
+    # carries the full ratings.
+    matches.sort(key=lambda lp: "(ALL)" not in lp[0].upper())
+    for label, path in matches:
+        scanner.retrieve_set_data(path)
+        config.card_data.latest_dataset = os.path.basename(path)
+        write_configuration(config)
+        return True
     return False
 
 
