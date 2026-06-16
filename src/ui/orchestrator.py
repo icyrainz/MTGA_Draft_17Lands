@@ -237,20 +237,28 @@ class DraftOrchestrator(threading.Thread):
             if not s_code:
                 return False
             sources = self.scanner.retrieve_data_sources()
-            for label, path in sources.items():
-                if f"[{s_code.upper()}]" in label.upper():
-                    # CACHE HIT: Skip reading the massive 25MB JSON file!
-                    if (
-                        self.config.card_data.latest_dataset == os.path.basename(path)
-                        and self.scanner.set_data._dataset is not None
-                    ):
-                        return True
-
-                    # Notify UI of heavy operation
-                    self.update_queue.put({"status": f"Loading {s_code} Dataset..."})
-
-                    self.scanner.retrieve_set_data(path)
-                    self.config.card_data.latest_dataset = os.path.basename(path)
-                    write_configuration(self.config)
+            matches = [
+                (label, path)
+                for label, path in sources.items()
+                if f"[{s_code.upper()}]" in label.upper()
+            ]
+            # Prefer the "(All)" variant: 17Lands "(Top)" datasets are frequently
+            # empty (0 games), which would leave every card unrated. Without this
+            # the first match (Top) wins and the whole pack shows score 0.
+            matches.sort(key=lambda lp: "(ALL)" not in lp[0].upper())
+            for label, path in matches:
+                # CACHE HIT: Skip reading the massive 25MB JSON file!
+                if (
+                    self.config.card_data.latest_dataset == os.path.basename(path)
+                    and self.scanner.set_data._dataset is not None
+                ):
                     return True
+
+                # Notify UI of heavy operation
+                self.update_queue.put({"status": f"Loading {s_code} Dataset..."})
+
+                self.scanner.retrieve_set_data(path)
+                self.config.card_data.latest_dataset = os.path.basename(path)
+                write_configuration(self.config)
+                return True
             return False
