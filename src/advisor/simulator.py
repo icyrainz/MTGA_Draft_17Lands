@@ -60,6 +60,17 @@ def _parse_deck_to_arrays(deck_list):
 
 
 @njit(cache=True)
+def seed_rng(seed):
+    """Seed Numba's internal RNG so the monte-carlo shuffles are reproducible.
+
+    Must run inside @njit: Numba keeps a random state separate from NumPy's
+    Python-level one, so np.random.seed() called from pure Python would not
+    affect _run_fast_monte_carlo's shuffles.
+    """
+    np.random.seed(seed)
+
+
+@njit(cache=True)
 def _run_fast_monte_carlo(
     is_land, is_ramp, is_removal, cmcs, mana_produced, primary_req, iterations
 ):

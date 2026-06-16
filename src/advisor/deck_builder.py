@@ -23,10 +23,15 @@ from src.advisor.deck_scorer import (
     calculate_holistic_score,
     estimate_record,
 )
-from src.advisor.simulator import simulate_deck
+from src.advisor.simulator import simulate_deck, seed_rng
+import hashlib
 
 logger = logging.getLogger(__name__)
 GLOBAL_DECK_CACHE = {}
+
+# Limited deckbuilding guardrails for the variant scorer (see suggest_deck).
+CREATURE_FLOOR = 15  # below this, the deck risks no board presence
+TRICK_CEILING = 3  # above this, too many do-nothing-without-a-creature cards
 
 
 def clear_deck_cache():
@@ -352,6 +357,67 @@ def optimize_deck(base_deck, base_sb, archetype_key, colors):
     return final_deck, final_sb, final_stats, f"Optimized: {best_perm[0]}"
 
 
+def rebalance_for_creatures(deck, sideboard, archetype_key, colors):
+    """Trade surplus combat tricks for the best castable bench creatures.
+
+    The construction heuristic picks by raw win rate and can leave a deck
+    trick-heavy and creature-light (plays worse than its card quality). This
+    swaps spell-for-spell, so the 40-card count and mana base are untouched.
+    Conservative: only cuts tricks beyond TRICK_CEILING, and never for a
+    creature that's a steep win-rate downgrade. Returns (deck, swap_notes).
+    """
+    deck = [dict(c) for c in deck]
+    is_crea = lambda c: "Creature" in c.get("types", [])
+    is_trick = lambda c: "combat_trick" in c.get("tags", [])
+
+    def wr(c):
+        dc = c.get("deck_colors", {})
+        return float(
+            dc.get(archetype_key, {}).get("gihwr")
+            or dc.get("All Decks", {}).get("gihwr", 0.0)
+        )
+
+    def total(pred):
+        return sum(c.get("count", 1) for c in deck if pred(c))
+
+    def remove_one(card):
+        for c in deck:
+            if c["name"] == card["name"]:
+                c["count"] = c.get("count", 1) - 1
+                if c["count"] <= 0:
+                    deck.remove(c)
+                return
+
+    def add_one(card):
+        for c in deck:
+            if c["name"] == card["name"]:
+                c["count"] = c.get("count", 1) + 1
+                return
+        new = dict(card)
+        new["count"] = 1
+        deck.append(new)
+
+    bench = sorted(
+        [c for c in sideboard if is_crea(c) and is_castable(c, colors, strict=True)],
+        key=wr,
+        reverse=True,
+    )
+    swap_notes = []
+    for cand in bench:
+        if total(is_trick) <= TRICK_CEILING:
+            break
+        tricks = sorted([c for c in deck if is_trick(c)], key=wr)
+        if not tricks:
+            break
+        out = tricks[0]
+        if wr(cand) < wr(out) - 4.0:  # don't trade into a steep downgrade
+            continue
+        remove_one(out)
+        add_one(cand)
+        swap_notes.append(f"+{cand.get('name')} -{out.get('name')}")
+    return deck, swap_notes
+
+
 def suggest_deck(
     taken_cards,
     metrics,
@@ -378,6 +444,13 @@ def suggest_deck(
             if progress_callback:
                 progress_callback({"status": "Loaded optimized decks from cache."})
             return GLOBAL_DECK_CACHE[cache_key]
+
+        # Deterministic builds: seed the monte-carlo RNG from the pool itself so
+        # an unchanged pool always yields the same decks. The sim drives both
+        # mana-base optimization and final scoring, so without this an identical
+        # pool produced different #1 decks run to run. md5 (not hash()) because
+        # Python's hash() is salted per-process.
+        seed_rng(int(hashlib.md5("|".join(pool_sig).encode()).hexdigest()[:8], 16))
 
         color_options = identify_top_pairs(taken_cards, metrics)
         all_variants, incomplete_variants = [], []
@@ -446,7 +519,12 @@ def suggest_deck(
                         else f"Splash {''.join(active_colors[2:])}"
                     )
 
-            opt_deck, opt_sb, opt_note = deck, sb, ""
+            opt_deck, swap_notes = rebalance_for_creatures(
+                deck, sb, true_arch_key, active_colors
+            )
+            # Keep the sideboard consistent with the rebalanced maindeck.
+            opt_sb = get_sideboard(taken_cards, opt_deck) if swap_notes else sb
+            opt_note = "Balanced: " + ", ".join(swap_notes) if swap_notes else ""
 
             # Generate a strict string signature of the 40-card deck
             deck_sig = "|".join(
@@ -483,6 +561,38 @@ def suggest_deck(
                             if breakdown
                             else ", ".join(mc_penalties)
                         )
+
+                # Limited fundamentals the win-rate score doesn't know: a 40 with
+                # too few creatures or a stack of combat tricks plays worse than
+                # its raw card quality. Nudge the score so better-balanced builds
+                # win ties between similarly-rated variants.
+                creatures = sum(
+                    c.get("count", 1)
+                    for c in opt_deck
+                    if "Creature" in c.get("types", [])
+                )
+                tricks = sum(
+                    c.get("count", 1)
+                    for c in opt_deck
+                    if "combat_trick" in c.get("tags", [])
+                )
+                balance_penalties = []
+                if creatures < CREATURE_FLOOR:
+                    pen = min((CREATURE_FLOOR - creatures) * 2.0, 12.0)
+                    score -= pen
+                    balance_penalties.append(f"Few Creatures {creatures} (-{pen:.1f})")
+                if tricks > TRICK_CEILING:
+                    pen = min((tricks - TRICK_CEILING) * 2.5, 10.0)
+                    score -= pen
+                    balance_penalties.append(f"Trick-Heavy {tricks} (-{pen:.1f})")
+                if balance_penalties:
+                    score = max(0.0, score)
+                    breakdown = (
+                        f"{breakdown} | {', '.join(balance_penalties)}"
+                        if breakdown
+                        else ", ".join(balance_penalties)
+                    )
+
                 simulated_cache[deck_sig] = (opt_stats, score, breakdown)
 
             sig = tuple(
