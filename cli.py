@@ -85,6 +85,19 @@ def tint_colors(colors):
     return "".join(tint(c, MANA_ANSI.get(c, "")) for c in colors)
 
 
+def card_name_tint(name, colors):
+    """Bold the card name, colored by its identity (gold = multicolor)."""
+    if not sys.stdout.isatty():
+        return name
+    if len(colors) == 1:
+        code = MANA_ANSI.get(colors[0], "")
+    elif len(colors) >= 2:
+        code = "\033[33m"  # gold for multicolor cards
+    else:
+        code = ""  # colorless / artifact: leave default
+    return f"{BOLD}{code}{name}{RESET}"
+
+
 def grade_tint(grade):
     if grade.startswith(("A", "B")):
         return tint(grade, "\033[92m")
@@ -309,9 +322,19 @@ def render_pack(snap, opts):
     # base_win_rate == 0 means no 17Lands data; a suggestion would be arbitrary
     if top and top[0].base_win_rate > 0:
         rec = top[0]
+        sugg = next(
+            (c for c in snap["pack_cards"]
+             if c.get(constants.DATA_FIELD_NAME) == rec.card_name),
+            None,
+        )
+        sugg_colors = sugg.get("colors", []) if sugg else []
         reasons = "; ".join(rec.reasoning[:3]) if rec.reasoning else ""
-        print(tint(f">> Suggested: {rec.card_name} (score {rec.contextual_score:.0f})"
-                   f"{' - ' + reasons if reasons else ''}", BOLD))
+        tail = f" (score {rec.contextual_score:.0f})" + (f" - {reasons}" if reasons else "")
+        print(
+            tint(">> Suggested: ", BOLD)
+            + card_name_tint(rec.card_name, sugg_colors)
+            + tint(tail, BOLD)
+        )
 
 
 def render_picks(snap, opts):
