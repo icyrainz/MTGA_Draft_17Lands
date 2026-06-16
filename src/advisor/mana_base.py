@@ -131,11 +131,14 @@ def calculate_dynamic_mana_base(spells, non_basic_lands, colors, forced_count=17
                     allocations[c] -= 1
                     diff -= 1
     elif total_allocated < forced_count:
+        # Spread the remaining basics across colors in proportion to their pip
+        # weight. Previously this only bumped the top two colors once and then
+        # dumped every leftover land on the single most-pipped color, which gave
+        # a balanced two-color deck a wildly lopsided base (e.g. 3 Island / 11
+        # Forest for a 7-pip / 8-pip split).
         diff = forced_count - total_allocated
-        for c in sorted_active[:2]:
-            if diff > 0:
-                allocations[c] += 1
-                diff -= 1
+        for c, n in _apportion(diff, sorted_active, strict_pips).items():
+            allocations[c] += n
 
     lands = []
     for c, count in allocations.items():
@@ -144,9 +147,30 @@ def calculate_dynamic_mana_base(spells, non_basic_lands, colors, forced_count=17
 
     final_diff = forced_count - len(lands)
     if final_diff > 0:
-        fallback_color = sorted_active[0] if sorted_active else "W"
-        lands.extend(create_basic_lands(fallback_color, final_diff))
+        fallback = _apportion(final_diff, sorted_active, strict_pips) or {
+            (sorted_active[0] if sorted_active else "W"): final_diff
+        }
+        for c, n in fallback.items():
+            lands.extend(create_basic_lands(c, n))
     return lands
+
+
+def _apportion(amount, colors, weights):
+    """Split `amount` lands across `colors` proportionally to `weights` (pip
+    counts), using largest-remainder rounding so the totals stay exact."""
+    if amount <= 0 or not colors:
+        return {}
+    wtotal = sum(max(0, weights.get(c, 0)) for c in colors) or len(colors)
+    shares = {
+        c: amount * (max(0, weights.get(c, 0)) or 1) / wtotal for c in colors
+    }
+    out = {c: int(s) for c, s in shares.items()}
+    leftover = amount - sum(out.values())
+    for c in sorted(colors, key=lambda x: shares[x] - int(shares[x]), reverse=True)[
+        :leftover
+    ]:
+        out[c] += 1
+    return out
 
 
 def create_basic_lands(color, count):

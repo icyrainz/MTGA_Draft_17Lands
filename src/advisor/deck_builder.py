@@ -415,6 +415,27 @@ def rebalance_for_creatures(deck, sideboard, archetype_key, colors):
         remove_one(out)
         add_one(cand)
         swap_notes.append(f"+{cand.get('name')} -{out.get('name')}")
+
+    # Swapping spells shifts the deck's color balance, so the mana base built
+    # before this point is now stale. Recompute the basics for the new spells
+    # (otherwise e.g. trading green tricks for blue creatures leaves a
+    # green-heavy base that can't cast the blue cards).
+    if swap_notes:
+        is_basic = lambda c: "Land" in c.get("types", []) and (
+            "Basic" in c.get("types", []) or c.get("name") in constants.BASIC_LANDS
+        )
+        spells = [c for c in deck if "Land" not in c.get("types", [])]
+        nonbasic = [
+            c for c in deck if "Land" in c.get("types", []) and not is_basic(c)
+        ]
+        used = sum(c.get("count", 1) for c in spells) + sum(
+            c.get("count", 1) for c in nonbasic
+        )
+        basics = calculate_dynamic_mana_base(
+            spells, nonbasic, colors, forced_count=40 - used
+        )
+        deck = stack_cards(spells + nonbasic + basics)
+
     return deck, swap_notes
 
 
@@ -885,12 +906,17 @@ def build_variant_curve(pool, colors, metrics, tier_data=None):
         if is_castable(c, colors, strict=True) and "Land" not in c.get("types", [])
     ]
 
+    # A flat curve penalty must not bury bombs: a 5-drop well above the format
+    # mean (e.g. a token-making rare) belongs in even a tempo deck.
+    bomb_mean, bomb_std = metrics.get_metrics("All Decks", "gihwr")
+    bomb_floor = (bomb_mean or 54.0) + (bomb_std or 4.0)
+
     def tempo_rating(card):
         base, cmc = get_card_rating(card, colors, metrics), get_functional_cmc(card)
         if cmc <= 2:
             return base + 4.0
         if cmc >= 5:
-            return base - 8.0
+            return base if base >= bomb_floor else base - 8.0
         return base
 
     candidates.sort(key=tempo_rating, reverse=True)
