@@ -418,16 +418,14 @@ def render_deck(snap, opts, config):
 
 
 def state_key(snap):
-    """Identity of the rendered state; a REFRESH only prints when it changes."""
+    """Identity of the pack on screen; a REFRESH only re-prints when it changes.
+
+    Keyed on the pick slot and its cards only -- deliberately NOT picked_cards
+    or filter. Making a pick marks the card [taken] and recomputes deck colors,
+    which would otherwise re-print the very same pack a second time.
+    """
     names = tuple(sorted(c.get(constants.DATA_FIELD_NAME, "") for c in snap["pack_cards"]))
-    return (
-        snap["event_set"],
-        snap["pack"],
-        snap["pick"],
-        names,
-        len(snap["picked_cards"] or []),
-        snap["filter"],
-    )
+    return (snap["event_set"], snap["pack"], snap["pick"], names)
 
 
 def watch(config, scanner, opts, last_state):
