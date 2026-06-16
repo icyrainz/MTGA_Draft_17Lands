@@ -32,6 +32,7 @@ GLOBAL_DECK_CACHE = {}
 # Limited deckbuilding guardrails for the variant scorer (see suggest_deck).
 CREATURE_FLOOR = 15  # below this, the deck risks no board presence
 TRICK_CEILING = 3  # above this, too many do-nothing-without-a-creature cards
+INTERACTION_FLOOR = 5  # don't leave removal on the bench for weaker filler
 
 
 def clear_deck_cache():
@@ -410,6 +411,41 @@ def rebalance_for_creatures(deck, sideboard, archetype_key, colors):
         if not tricks:
             break
         out = tricks[0]
+        if wr(cand) < wr(out) - 4.0:  # don't trade into a steep downgrade
+            continue
+        remove_one(out)
+        add_one(cand)
+        swap_notes.append(f"+{cand.get('name')} -{out.get('name')}")
+
+    # Interaction floor: never leave removal/interaction on the bench while the
+    # maindeck runs weaker filler. Swap the worst non-creature, non-removal
+    # spell for the best castable benched removal until the floor is met.
+    is_removal = lambda c: "removal" in c.get("tags", [])
+    bench_removal = sorted(
+        [
+            c
+            for c in sideboard
+            if is_removal(c) and is_castable(c, colors, strict=True)
+        ],
+        key=wr,
+        reverse=True,
+    )
+    for cand in bench_removal:
+        if total(is_removal) >= INTERACTION_FLOOR:
+            break
+        filler = sorted(
+            [
+                c
+                for c in deck
+                if "Land" not in c.get("types", [])
+                and not is_crea(c)
+                and not is_removal(c)
+            ],
+            key=wr,
+        )
+        if not filler:
+            break
+        out = filler[0]
         if wr(cand) < wr(out) - 4.0:  # don't trade into a steep downgrade
             continue
         remove_one(out)
@@ -912,11 +948,14 @@ def build_variant_curve(pool, colors, metrics, tier_data=None):
     bomb_floor = (bomb_mean or 54.0) + (bomb_std or 4.0)
 
     def tempo_rating(card):
+        # Curve is a tiebreaker, not an override: 17Lands win rate already
+        # prices in tempo/evasion, so a small nudge keeps the low-curve lean
+        # without letting "costs 2" leapfrog a 3-point-better card.
         base, cmc = get_card_rating(card, colors, metrics), get_functional_cmc(card)
         if cmc <= 2:
-            return base + 4.0
+            return base + 1.5
         if cmc >= 5:
-            return base if base >= bomb_floor else base - 8.0
+            return base if base >= bomb_floor else base - 2.0
         return base
 
     candidates.sort(key=tempo_rating, reverse=True)
