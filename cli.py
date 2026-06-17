@@ -415,9 +415,16 @@ def render_deck(snap, opts, config):
         f"({count(spells)} spells, {count(lands)} lands)  |  est. record {best.get('record', '?')}"
     )
     print(tint(f"  {'#':>2} {'CMC':>3}  {'CLR':<5} CARD", DIM))
+    # Match MTGA's deck-builder order: mana value asc -> creatures before
+    # noncreatures at each cost -> alphabetical. Makes it easy to line the CLI
+    # list up against the in-client deck when deciding cuts.
     for card in sorted(
         spells,
-        key=lambda c: (c.get("cmc", 0) or 0, c.get(constants.DATA_FIELD_NAME, "")),
+        key=lambda c: (
+            c.get("cmc", 0) or 0,
+            0 if "Creature" in c.get("types", []) else 1,
+            c.get(constants.DATA_FIELD_NAME, ""),
+        ),
     ):
         cnt = card.get(constants.DATA_FIELD_COUNT, 1)
         cmc = card.get("cmc", 0) or 0
