@@ -415,12 +415,26 @@ def render_deck(snap, opts, config):
         f"({count(spells)} spells, {count(lands)} lands)  |  est. record {best.get('record', '?')}"
     )
     print(tint(f"  {'#':>2} {'CMC':>3}  {'CLR':<5} CARD", DIM))
-    # Match MTGA's deck-builder order: mana value ascending, then alphabetical
-    # within each cost (no type grouping). Lets the CLI list line up row-for-row
-    # against the in-client deck when deciding cuts.
+    # Match MTGA's deck-builder order: mana value ascending -> color (WUBRG,
+    # then multicolor, then colorless) -> alphabetical. Lets the CLI list line
+    # up row-for-row against the in-client deck when deciding cuts.
+    wubrg = {"W": 0, "U": 1, "B": 2, "R": 3, "G": 4}
+
+    def color_rank(c):
+        cols = c.get("colors", [])
+        if not cols:
+            return 6  # colorless / artifact, after colored
+        if len(cols) >= 2:
+            return 5  # multicolor, after mono
+        return wubrg.get(cols[0], 5)
+
     for card in sorted(
         spells,
-        key=lambda c: (c.get("cmc", 0) or 0, c.get(constants.DATA_FIELD_NAME, "")),
+        key=lambda c: (
+            c.get("cmc", 0) or 0,
+            color_rank(c),
+            c.get(constants.DATA_FIELD_NAME, ""),
+        ),
     ):
         cnt = card.get(constants.DATA_FIELD_COUNT, 1)
         cmc = card.get("cmc", 0) or 0
