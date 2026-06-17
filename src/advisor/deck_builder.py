@@ -470,7 +470,20 @@ def rebalance_for_creatures(deck, sideboard, archetype_key, colors):
         basics = calculate_dynamic_mana_base(
             spells, nonbasic, colors, forced_count=40 - used
         )
-        deck = stack_cards(spells + nonbasic + basics)
+        # spells/nonbasic are already stacked (carry counts); only the fresh
+        # basics need consolidating. Do NOT re-run stack_cards over the whole
+        # list -- it counts list occurrences and ignores existing counts, so a
+        # 4-of spell would collapse to a single copy.
+        stacked_basics = {}
+        for b in basics:
+            name = b.get("name")
+            if name in stacked_basics:
+                stacked_basics[name]["count"] += 1
+            else:
+                nb = dict(b)
+                nb["count"] = 1
+                stacked_basics[name] = nb
+        deck = spells + nonbasic + list(stacked_basics.values())
 
     return deck, swap_notes
 
