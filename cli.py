@@ -444,11 +444,16 @@ def render_deck(snap, opts, config):
             f"{pad(tint_colors(colors), ''.join(colors), 5)} {card.get(constants.DATA_FIELD_NAME)}"
         )
     if lands:
+        basics = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
         land_str = ", ".join(
             f"{c.get(constants.DATA_FIELD_COUNT, 1)} {c.get(constants.DATA_FIELD_NAME)}"
             for c in sorted(
                 lands,
-                key=lambda c: (color_rank(c), c.get(constants.DATA_FIELD_NAME, "")),
+                key=lambda c: (
+                    0 if c.get(constants.DATA_FIELD_NAME) in basics else 1,
+                    color_rank(c),
+                    c.get(constants.DATA_FIELD_NAME, ""),
+                ),
             )
         )
         print(f"  lands: {land_str}")
