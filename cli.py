@@ -416,8 +416,9 @@ def render_deck(snap, opts, config):
     )
     print(tint(f"  {'#':>2} {'CMC':>3}  {'CLR':<5} CARD", DIM))
     # Match MTGA's deck-builder order: mana value ascending -> color (WUBRG,
-    # then multicolor, then colorless) -> alphabetical. Lets the CLI list line
-    # up row-for-row against the in-client deck when deciding cuts.
+    # then multicolor, then colorless) -> pip count -> alphabetical. The pip
+    # tiebreak keeps X spells (e.g. {X}{X}{U}, mana value 1) at the end of their
+    # mana-value bucket, just like the client, so the list lines up row-for-row.
     wubrg = {"W": 0, "U": 1, "B": 2, "R": 3, "G": 4}
 
     def color_rank(c):
@@ -428,11 +429,19 @@ def render_deck(snap, opts, config):
             return 5  # multicolor, after mono
         return wubrg.get(cols[0], 5)
 
+    def pip_count(c):
+        # Count mana symbols in the (primary face of the) mana cost. X-cost
+        # cards carry extra pips, so they sort after fixed-cost cards of the
+        # same mana value.
+        cost = (c.get("mana_cost") or "").split("//")[0]
+        return cost.count("{")
+
     for card in sorted(
         spells,
         key=lambda c: (
             c.get("cmc", 0) or 0,
             color_rank(c),
+            pip_count(c),
             c.get(constants.DATA_FIELD_NAME, ""),
         ),
     ):
