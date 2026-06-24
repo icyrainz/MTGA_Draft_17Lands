@@ -19,6 +19,7 @@ Requires only the headless dependencies (requirements-cli.txt); no GUI libraries
 """
 
 import argparse
+import json
 import logging
 import os
 import queue
@@ -106,6 +107,43 @@ def grade_tint(grade):
     if grade in ("-", ""):
         return grade
     return tint(grade, "\033[91m")
+
+
+_CFB_CACHE = {}
+
+
+def load_cfb_ratings(set_code):
+    """Manual ChannelFireball Limited grades for a set, read from
+    cfb_ratings/<SET>.json (card name -> 0-5 grade). Cached per set; a missing
+    file just yields {} so the CFB column stays blank. These are hand-entered
+    from the CFB/LSV set review since that content isn't machine-readable."""
+    if not set_code:
+        return {}
+    key = set_code.upper()
+    if key not in _CFB_CACHE:
+        path = os.path.join("cfb_ratings", f"{key}.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                _CFB_CACHE[key] = json.load(handle)
+        except (OSError, ValueError):
+            _CFB_CACHE[key] = {}
+    return _CFB_CACHE[key]
+
+
+def cfb_tint(value):
+    """Color a CFB grade string the way grade_tint colors letter grades:
+    green for premium (>=4.0), yellow for solid (>=3.0), red below."""
+    if value in ("-", ""):
+        return value
+    try:
+        num = float(value)
+    except ValueError:
+        return value
+    if num >= 4.0:
+        return tint(value, "\033[92m")
+    if num >= 3.0:
+        return tint(value, "\033[93m")
+    return tint(value, "\033[91m")
 
 
 def pad(colored, plain, width):
@@ -251,7 +289,7 @@ def snapshot(scanner, config, opts):
     }
 
 
-def card_stat_row(card, active_filter, metrics, result_format):
+def card_stat_row(card, active_filter, metrics, result_format, cfb_ratings=None):
     stats = card.get("deck_colors", {}).get(active_filter, {})
     gihwr = stats.get(constants.DATA_FIELD_GIHWR, 0.0) or 0.0
     grade = format_win_rate(
@@ -262,9 +300,11 @@ def card_stat_row(card, active_filter, metrics, result_format):
         value = stats.get(field, 0.0)
         return f"{value:.1f}" if isinstance(value, float) and value != 0.0 else "-"
 
+    cfb = (cfb_ratings or {}).get(card.get(constants.DATA_FIELD_NAME))
     return {
         "gihwr": gihwr,
         "grade": grade if gihwr else "-",
+        "cfb": f"{cfb:.1f}" if isinstance(cfb, (int, float)) else "-",
         "gih": num(constants.DATA_FIELD_GIHWR),
         "oh": num(constants.DATA_FIELD_OHWR),
         "alsa": num(constants.DATA_FIELD_ALSA),
@@ -280,6 +320,7 @@ def render_pack(snap, opts):
 
     active_filter = snap["filter"]
     metrics = snap["metrics"]
+    cfb_ratings = load_cfb_ratings(snap["event_set"])
     rec_map = {r.card_name: r for r in snap["recommendations"]}
     picked_names = {c.get(constants.DATA_FIELD_NAME) for c in (snap["picked_cards"] or [])}
 
@@ -289,14 +330,14 @@ def render_pack(snap, opts):
     )
     print()
     print(tint(f"== {title} ==", BOLD))
-    header = f"{'SCORE':>5}  {'GRADE':<5} {'GIH%':>5} {'OH%':>5} {'ALSA':>4} {'IWD':>5} {'WHEEL':>5}  {'CLR':<5} CARD"
+    header = f"{'SCORE':>5}  {'GRADE':<5} {'CFB':>4} {'GIH%':>5} {'OH%':>5} {'ALSA':>4} {'IWD':>5} {'WHEEL':>5}  {'CLR':<5} CARD"
     print(tint(header, DIM))
 
     rows = []
     for card in snap["pack_cards"]:
         name = card.get(constants.DATA_FIELD_NAME, "Unknown")
         rec = rec_map.get(name)
-        stats = card_stat_row(card, active_filter, metrics, opts.result_format)
+        stats = card_stat_row(card, active_filter, metrics, opts.result_format, cfb_ratings)
         rows.append((rec.contextual_score if rec else stats["gihwr"], name, rec, card, stats))
     rows.sort(key=lambda r: r[0], reverse=True)
 
@@ -314,6 +355,7 @@ def render_pack(snap, opts):
         colors = card.get("colors", [])
         print(
             f"{score:>5}  {pad(grade_tint(stats['grade']), stats['grade'], 5)} "
+            f"{pad(cfb_tint(stats['cfb']), stats['cfb'], 4)} "
             f"{stats['gih']:>5} {stats['oh']:>5} {stats['alsa']:>4} {stats['iwd']:>5} {wheel:>5}  "
             f"{pad(tint_colors(colors), ''.join(colors), 5)} {display}"
         )
