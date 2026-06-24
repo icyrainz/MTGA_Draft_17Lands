@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import queue
+import re
 import select
 import sys
 
@@ -458,9 +459,11 @@ def render_deck(snap, opts, config):
     )
     print(tint(f"  {'#':>2} {'CMC':>3}  {'CLR':<5} CARD", DIM))
     # Match MTGA's deck-builder order: mana value ascending -> color (WUBRG,
-    # then multicolor, then colorless) -> pip count -> alphabetical. The pip
-    # tiebreak keeps X spells (e.g. {X}{X}{U}, mana value 1) at the end of their
-    # mana-value bucket, just like the client, so the list lines up row-for-row.
+    # then multicolor, then colorless) -> total pips -> colored pips ->
+    # alphabetical. Total pips keep X spells (e.g. {X}{X}{U}, mana value 1) at
+    # the end of their bucket; colored pips drop double-pip costs (e.g. {G}{G}
+    # after {1}{G}) below single-pip ones, just like the client, so the list
+    # lines up row-for-row.
     wubrg = {"W": 0, "U": 1, "B": 2, "R": 3, "G": 4}
 
     def color_rank(c):
@@ -471,19 +474,22 @@ def render_deck(snap, opts, config):
             return 5  # multicolor, after mono
         return wubrg.get(cols[0], 5)
 
-    def pip_count(c):
-        # Count mana symbols in the (primary face of the) mana cost. X-cost
-        # cards carry extra pips, so they sort after fixed-cost cards of the
-        # same mana value.
+    def pips(c):
+        # Mana symbols in the (primary face of the) mana cost. Returns
+        # (total, colored): total pushes X-cost cards after fixed-cost cards of
+        # the same mana value; colored pushes double-colored costs ({G}{G})
+        # after single-colored ones ({1}{G}) when totals tie.
         cost = (c.get("mana_cost") or "").split("//")[0]
-        return cost.count("{")
+        symbols = re.findall(r"\{([^}]+)\}", cost)
+        colored = sum(1 for s in symbols if any(ch in s for ch in "WUBRG"))
+        return (len(symbols), colored)
 
     for card in sorted(
         spells,
         key=lambda c: (
             c.get("cmc", 0) or 0,
             color_rank(c),
-            pip_count(c),
+            *pips(c),
             c.get(constants.DATA_FIELD_NAME, ""),
         ),
     ):
